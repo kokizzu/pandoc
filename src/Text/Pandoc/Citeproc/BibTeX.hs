@@ -59,10 +59,11 @@ data Variant = Bibtex | Biblatex
   deriving (Show, Eq, Ord)
 
 -- | Parse BibTeX or BibLaTeX into a list of 'Reference's.
-readBibtexString :: Variant           -- ^ bibtex or biblatex
+readBibtexString :: ToSources a
+                 => Variant           -- ^ bibtex or biblatex
                  -> Locale            -- ^ Locale
                  -> (Text -> Bool)    -- ^ Filter on citation ids
-                 -> Text              -- ^ bibtex/biblatex text
+                 -> a                 -- ^ bibtex/biblatex text
                  -> Either ParseError [Reference Inlines]
 readBibtexString variant locale idpred contents = do
   case runParser (((resolveCrossRefs variant <$> bibEntries) <* eof) >>=
@@ -70,9 +71,11 @@ readBibtexString variant locale idpred contents = do
                       filter (\item -> idpred (identifier item) &&
                                         entryType item /= "xdata"))
            (fromMaybe defaultLang $ localeLanguage locale, Map.empty)
-           "" contents of
+           (initialSourceName sources) sources of
           Left err -> Left err
           Right xs -> return xs
+ where
+  sources = toSources contents
 
 -- | Write BibTeX or BibLaTeX given given a 'Reference'.
 writeBibtexString :: WriterOptions       -- ^ options (for writing LaTex)
@@ -155,6 +158,7 @@ writeBibtexString opts variant mblang ref =
            , "langid"
            , "abstract"
            , "keywords"
+           , "annote"
            ]
       Bibtex ->
            [ "author"
@@ -174,6 +178,7 @@ writeBibtexString opts variant mblang ref =
            , "address"
            , "type"
            , "note"
+           , "annote"
            ]
 
   valToInlines (TextVal t) = B.text t
@@ -339,7 +344,7 @@ defaultLang = Lang "en" Nothing (Just "US") [] [] []
 -- a map of bibtex "string" macros
 type StringMap = Map.Map Text Text
 
-type BibParser = Parser Text (Lang, StringMap)
+type BibParser = Parser Sources (Lang, StringMap)
 
 data Item = Item{ identifier :: Text
                 , sourcePos  :: SourcePos
@@ -804,7 +809,7 @@ bibEntries = do
                        (bibComment <|> bibPreamble <|> bibString))
 
 bibSkip :: BibParser ()
-bibSkip = () <$ take1WhileP (/='@')
+bibSkip = skipMany1 (satisfy (/='@'))
 
 bibComment :: BibParser ()
 bibComment = do
@@ -828,6 +833,9 @@ bibString = do
   char '}'
   updateState (\(l,m) -> (l, Map.insert k v m))
   return ()
+
+take1WhileP :: Monad m => (Char -> Bool) -> ParserT Sources u m Text
+take1WhileP f = T.pack <$> many1 (satisfy f)
 
 inBraces :: BibParser Text
 inBraces = do
@@ -860,7 +868,7 @@ fieldName = resolveAlias . T.toLower
 
 isBibtexKeyChar :: Char -> Bool
 isBibtexKeyChar c =
-  isAlphaNum c || c `elem` (".:;?!`'()/*@_+=-[]*&" :: [Char])
+  isAlphaNum c || c `elem` (".:;?!`'()$/*@_+=-[]*&" :: [Char])
 
 bibItem :: BibParser Item
 bibItem = do

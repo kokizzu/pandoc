@@ -21,12 +21,13 @@ module Text.Pandoc.Writers.JATS
   , writeJatsPublishing
   , writeJatsArticleAuthoring
   ) where
+import Control.Applicative ((<|>))
 import Control.Monad.Reader
 import Control.Monad.State
 import Data.Generics (everywhere, mkT)
 import Data.List (partition)
 import qualified Data.Map as M
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Time (toGregorian, Day, parseTimeM, defaultTimeLocale, formatTime)
 import qualified Data.Text as T
 import Data.Text (Text)
@@ -224,19 +225,21 @@ imageMimeType src kvs =
                   (T.drop 1 . T.dropWhile (/='/') <$> mbMT)
   in (maintype, subtype)
 
-languageFor :: [Text] -> Text
-languageFor classes =
+languageFor :: WriterOptions -> [Text] -> Text
+languageFor opts classes =
   case langs of
      (l:_) -> escapeStringForXML l
      []    -> ""
-    where isLang l    = T.toLower l `elem` map T.toLower languages
+    where
+          syntaxMap = writerSyntaxMap opts
+          isLang l    = T.toLower l `elem` map T.toLower (languages syntaxMap)
           langsFrom s = if isLang s
                            then [s]
-                           else languagesByExtension . T.toLower $ s
+                           else (languagesByExtension syntaxMap) . T.toLower $ s
           langs       = concatMap langsFrom classes
 
-codeAttr :: Attr -> (Text, [(Text, Text)])
-codeAttr (ident,classes,kvs) = (lang, attr)
+codeAttr :: WriterOptions -> Attr -> (Text, [(Text, Text)])
+codeAttr opts (ident,classes,kvs) = (lang, attr)
     where
        attr = [("id", escapeNCName ident) | not (T.null ident)] ++
               [("language",lang) | not (T.null lang)] ++
@@ -244,7 +247,7 @@ codeAttr (ident,classes,kvs) = (lang, attr)
                 "code-version", "executable",
                 "language-version", "orientation",
                     "platforms", "position", "specific-use"]]
-       lang  = languageFor classes
+       lang  = languageFor opts classes
 
 -- | Convert a Pandoc block element to JATS.
 blockToJATS :: PandocMonad m => WriterOptions -> Block -> JATS m (Doc Text)
@@ -330,9 +333,9 @@ blockToJATS opts (BlockQuote blocks) = do
                     HorizontalRule -> True
                     _              -> False
   inTagsIndented "disp-quote" <$> wrappedBlocksToJATS needsWrap opts blocks
-blockToJATS _ (CodeBlock a str) = return $
+blockToJATS opts (CodeBlock a str) = return $
   inTags False tag attr (flush (text (T.unpack $ escapeStringForXML str)))
-    where (lang, attr) = codeAttr a
+    where (lang, attr) = codeAttr opts a
           tag          = if T.null lang then "preformat" else "code"
 blockToJATS _ (BulletList []) = return empty
 blockToJATS opts (BulletList lst) =
@@ -412,9 +415,9 @@ inlineToJATS opts (Quoted SingleQuote lst) = do
 inlineToJATS opts (Quoted DoubleQuote lst) = do
   contents <- inlinesToJATS opts lst
   return $ char '“' <> contents <> char '”'
-inlineToJATS _ (Code a str) =
+inlineToJATS opts (Code a str) =
   return $ inTags False tag attr $ literal (escapeStringForXML str)
-    where (lang, attr) = codeAttr a
+    where (lang, attr) = codeAttr opts a
           tag          = if T.null lang then "monospace" else "code"
 inlineToJATS _ il@(RawInline f x)
   | f == "jats" = return $ literal x
@@ -447,18 +450,33 @@ inlineToJATS opts (Note contents) = do
              $ text (show notenum)
 inlineToJATS opts (Cite _ lst) =
   inlinesToJATS opts lst
-inlineToJATS opts (Span (ident,_,kvs) ils) = do
+inlineToJATS opts (Span (ident,classes,kvs) ils) = do
   contents <- inlinesToJATS opts ils
-  let attr = [("id", escapeNCName ident) | not (T.null ident)] ++
-             [("xml:lang",l) | ("lang",l) <- kvs] ++
-             [(k,v) | (k,v) <- kvs
-                    ,  k `elem` ["alt", "content-type", "rid", "specific-use",
-                                 "vocab", "vocab-identifier", "vocab-term",
-                                 "vocab-term-identifier"]]
+  let commonAttr = [("id", escapeNCName ident) | not (T.null ident)] ++
+                   [("xml:lang",l) | ("lang",l) <- kvs] ++
+                   [(k,v) | (k,v) <- kvs,  k `elem` ["alt", "specific-use"]]
+  -- A named-content element is a good fit for spans, but requires a
+  -- content-type attribute to be present. We use either the explicit
+  -- attribute or the first class as content type. If neither is
+  -- available, then we fall back to using a @styled-content@ element.
+  let (tag, specificAttr) =
+        case lookup "content-type" kvs <|> listToMaybe classes of
+          Just ct -> ( "named-content"
+                     , ("content-type", ct) :
+                       [(k, v) | (k, v) <- kvs
+                       , k `elem` ["rid", "vocab", "vocab-identifier",
+                                   "vocab-term", "vocab-term-identifier"]])
+          -- Fall back to styled-content
+          Nothing -> ("styled-content"
+                     , [(k, v) | (k,v) <- kvs
+                       , k `elem` ["style", "style-type", "style-detail",
+                                   "toggle"]])
+  let attr = commonAttr ++ specificAttr
+  -- unwrap if wrapping element would have no attributes
   return $
     if null attr
-    then contents  -- unwrap if no relevant attributes are given
-    else inTags False "named-content" attr contents
+    then contents
+    else inTags False tag attr contents
 inlineToJATS _ (Math t str) = do
   let addPref (Xml.Attr q v)
          | Xml.qName q == "xmlns" = Xml.Attr q{ Xml.qName = "xmlns:mml" } v

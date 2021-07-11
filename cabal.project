@@ -4,6 +4,10 @@ flags: +embed_data_files
 
 source-repository-package
   type: git
-  location: https://github.com/jgm/citeproc
-  tag: 46066cb8939e907e7e3a7126304919c8ed32aed0
+  location: https://github.com/jgm/doctemplates
+  tag: 428c26d5303cf7a2b1051fe1ffd9aafe9ba71c81
 
+source-repository-package
+  type: git
+  location: https://github.com/jgm/citeproc
+  tag: 4ce0501cd6f9c86eee087afcf878c256e49b9615

@@ -36,7 +36,8 @@ import Data.Time.Clock.POSIX
 import Data.Digest.Pure.SHA (sha1, showDigest)
 import Skylighting
 import Text.Collate.Lang (renderLang)
-import Text.Pandoc.Class.PandocMonad (PandocMonad, report, toLang)
+import Text.Pandoc.Class.PandocMonad (PandocMonad, report, toLang, translateTerm)
+import qualified Text.Pandoc.Translations as Term
 import qualified Text.Pandoc.Class.PandocMonad as P
 import Data.Time
 import Text.Pandoc.UTF8 (fromTextLazy)
@@ -53,6 +54,7 @@ import Text.Pandoc.Writers.Docx.Table
 import Text.Pandoc.Writers.Docx.Types
 import Text.Pandoc.Shared
 import Text.Pandoc.Walk
+import qualified Text.Pandoc.Writers.GridTable as Grid
 import Text.Pandoc.Writers.Math
 import Text.Pandoc.Writers.Shared
 import Text.TeXMath
@@ -468,12 +470,27 @@ writeDocx opts doc = do
   -- adds references to footnotes or endnotes we don't have...
   -- we do, however, copy some settings over from reference
   let settingsPath = "word/settings.xml"
-      settingsList = [ "w:autoHyphenation"
-                     , "w:consecutiveHyphenLimit"
-                     , "w:hyphenationZone"
-                     , "w:doNotHyphenateCap"
-                     , "w:evenAndOddHeaders"
-                     , "w:proofState"
+      settingsList = [ "zoom"
+                     , "embedSystemFonts"
+                     , "doNotTrackMoves"
+                     , "defaultTabStop"
+                     , "drawingGridHorizontalSpacing"
+                     , "drawingGridVerticalSpacing"
+                     , "displayHorizontalDrawingGridEvery"
+                     , "displayVerticalDrawingGridEvery"
+                     , "characterSpacingControl"
+                     , "savePreviewPicture"
+                     , "mathPr"
+                     , "themeFontLang"
+                     , "decimalSymbol"
+                     , "listSeparator"
+                     , "autoHyphenation"
+                     , "consecutiveHyphenLimit"
+                     , "hyphenationZone"
+                     , "doNotHyphenateCap"
+                     , "evenAndOddHeaders"
+                     , "proofState"
+                     , "compat"
                      ]
   settingsEntry <- copyChildren refArchive distArchive settingsPath epochtime settingsList
 
@@ -576,16 +593,17 @@ copyChildren :: (PandocMonad m)
 copyChildren refArchive distArchive path timestamp elNames = do
   ref  <- parseXml refArchive distArchive path
   dist <- parseXml distArchive distArchive path
+  let elsToCopy =
+        map cleanElem $ filterChildrenName (\e -> qName e `elem` elNames) ref
+  let elsToKeep =
+        [e | Elem e <- elContent dist, not (any (hasSameNameAs e) elsToCopy)]
   return $ toEntry path timestamp $ renderXml dist{
-      elContent = elContent dist ++ copyContent ref
+      elContent = map Elem elsToKeep ++ map Elem elsToCopy
     }
   where
-    strName QName{qName=name, qPrefix=prefix}
-      | Just p <- prefix = p <> ":" <> name
-      | otherwise        = name
-    shouldCopy = (`elem` elNames) . strName
-    cleanElem el@Element{elName=name} = Elem el{elName=name{qURI=Nothing}}
-    copyContent = map cleanElem . filterChildrenName shouldCopy
+    hasSameNameAs (Element {elName = n1}) (Element {elName = n2}) =
+      qName n1 == qName n2
+    cleanElem el@Element{elName=name} = el{elName=name{qURI=Nothing}}
 
 -- this is the lowest number used for a list numId
 baseListId :: Int
@@ -837,14 +855,28 @@ blockToOpenXML' opts (Plain lst) = do
 -- title beginning with fig: indicates that the image is a figure
 blockToOpenXML' opts (Para [Image attr alt (src,T.stripPrefix "fig:" -> Just tit)]) = do
   setFirstPara
+  fignum <- gets stNextFigureNum
+  unless (null alt) $ modify $ \st -> st{ stNextFigureNum = fignum + 1 }
+  let figid = "fig" <> tshow fignum
+  figname <- translateTerm Term.Figure
   prop <- pStyleM $
         if null alt
         then "Figure"
         else "Captioned Figure"
   paraProps <- local (\env -> env { envParaProperties = EnvProps (Just prop) [] <> envParaProperties env }) (getParaProps False)
   contents <- inlinesToOpenXML opts [Image attr alt (src,tit)]
-  captionNode <- withParaPropM (pStyleM "Image Caption")
-                 $ blockToOpenXML opts (Para alt)
+  captionNode <- if null alt
+                    then return []
+                    else withParaPropM (pStyleM "Image Caption")
+                         $ blockToOpenXML opts
+                            (Para $ Span (figid,[],[])
+                               [Str (figname <> "\160"),
+                                RawInline (Format "openxml")
+                                ("<w:fldSimple w:instr=\"SEQ Figure"
+                                <> " \\* ARABIC \"><w:r><w:t>"
+                                <> tshow fignum
+                                <> "</w:t></w:r></w:fldSimple>"),
+                                Str ":", Space] : alt)
   return $
     Elem (mknode "w:p" [] (map Elem paraProps ++ contents))
     : captionNode
@@ -889,8 +921,9 @@ blockToOpenXML' _ HorizontalRule = do
     $ mknode "v:rect" [("style","width:0;height:1.5pt"),
                        ("o:hralign","center"),
                        ("o:hrstd","t"),("o:hr","t")] () ]
-blockToOpenXML' opts (Table _ blkCapt specs thead tbody tfoot) =
-  tableToOpenXML (blocksToOpenXML opts) blkCapt specs thead tbody tfoot
+blockToOpenXML' opts (Table attr caption colspecs thead tbodies tfoot) =
+  tableToOpenXML (blocksToOpenXML opts)
+                 (Grid.toTable attr caption colspecs thead tbodies tfoot)
 blockToOpenXML' opts el
   | BulletList lst <- el = addOpenXMLList BulletMarker lst
   | OrderedList (start, numstyle, numdelim) lst <- el
@@ -1271,6 +1304,7 @@ inlineToOpenXML' opts (Image attr@(imgident, _, _) alt (src, title)) = do
             Just Eps  -> ".eps"
             Just Svg  -> ".svg"
             Just Emf  -> ".emf"
+            Just Tiff -> ".tiff"
             Nothing   -> ""
         imgpath = "media/" <> ident <> imgext
         mbMimeType = mt <|> getMimeType (T.unpack imgpath)
